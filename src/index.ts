@@ -100,6 +100,8 @@ export default {
         const urlStr = request.url;
         const userAgent = request.headers.get("User-Agent")?.toLowerCase() || "";
 
+        console.log(`[Worker Intercept] URL: ${urlStr} | User-Agent: ${userAgent}`);
+
         const isBot = BOT_USER_AGENTS.some((botToken) => userAgent.includes(botToken));
 
         // If not a bot, we could either return early (if this worker is only routing),
