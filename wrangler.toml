@@ -1,19 +1,18 @@
 name = "cautionlabs-prerendering"
 main = "src/index.ts"
+
 compatibility_date = "2024-09-09"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = false
 
-# Browser Rendering binding
 browser = { binding = "MYBROWSER", type = "browser" }
 
-# KV Namespace binding (You will need to replace the id with your actual KV namespace id)
 kv_namespaces = [
   { binding = "PRERENDER_CACHE", id = "e151b8c9449b494ca4e8b81ef042e951" }
 ]
 
 routes = [
-  { pattern = "cautionlabs.com/*", zone_name = "cautionlabs.com" }
+  { pattern = "cautionlabs.com/*", zone_name = "cautionlabs.com" },
+  { pattern = "www.cautionlabs.com/*", zone_name = "cautionlabs.com" }
 ]
 
 [observability.logs]
