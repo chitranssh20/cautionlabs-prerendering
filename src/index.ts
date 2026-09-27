@@ -93,7 +93,9 @@ const BOT_USER_AGENTS = [
     "developers.google.com/+/web/snippet"
 ];
 
-const CACHE_TTL_SECONDS = 14 * 24 * 60 * 60; // 14 days
+// Kept short because there is no cache-purge hook tied to frontend deploys yet —
+// a long TTL here means bots keep seeing stale title/meta/content after a deploy.
+const CACHE_TTL_SECONDS = 24 * 60 * 60; // 1 day
 
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -113,9 +115,14 @@ export default {
             return fetch(request);
         }
 
+        // Lets you force a fresh render + cache overwrite for a specific URL right after a
+        // deploy, instead of waiting out CACHE_TTL_SECONDS, e.g.:
+        //   curl -H "User-Agent: Googlebot" -H "X-Prerender-Refresh: 1" https://cautionlabs.com/pricing
+        const forceRefresh = request.headers.get("X-Prerender-Refresh") === "1";
+
         try {
             // 1. Check in KV Cache
-            const cachedHtml = await env.PRERENDER_CACHE.get(urlStr);
+            const cachedHtml = forceRefresh ? null : await env.PRERENDER_CACHE.get(urlStr);
             if (cachedHtml) {
                 return new Response(cachedHtml, {
                     headers: {
