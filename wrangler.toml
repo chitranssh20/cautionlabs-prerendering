@@ -12,7 +12,8 @@ kv_namespaces = [
 
 routes = [
   { pattern = "cautionlabs.com/*", zone_name = "cautionlabs.com" },
-  { pattern = "www.cautionlabs.com/*", zone_name = "cautionlabs.com" }
+  # The dev site: the worker only blocks crawling there (see NO_CRAWL_HOSTS in src/index.ts).
+  { pattern = "dev.cautionlabs.com/*", zone_name = "cautionlabs.com" }
 ]
 
 [observability.logs]

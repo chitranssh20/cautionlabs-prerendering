@@ -93,6 +93,26 @@ const BOT_USER_AGENTS = [
     "developers.google.com/+/web/snippet"
 ];
 
+// Hosts that must never be crawled or indexed. Production stays crawlable: it is not listed here.
+const NO_CRAWL_HOSTS = new Set(["dev.cautionlabs.com"]);
+
+const NO_CRAWL_ROBOTS_TXT = "User-agent: *\nDisallow: /\n";
+const NO_CRAWL_HEADER = "noindex, nofollow, noarchive";
+
+// For a no-crawl host: answer /robots.txt ourselves, and mark every other response so a crawler that
+// ignores robots.txt still does not index it. Nothing is prerendered, whoever is asking.
+async function serveNoCrawlHost(request: Request, pathname: string): Promise<Response> {
+    if (pathname === "/robots.txt") {
+        return new Response(NO_CRAWL_ROBOTS_TXT, {
+            headers: { "Content-Type": "text/plain;charset=UTF-8", "X-Robots-Tag": NO_CRAWL_HEADER }
+        });
+    }
+    const response = await fetch(request);
+    const headers = new Headers(response.headers);
+    headers.set("X-Robots-Tag", NO_CRAWL_HEADER);
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 // Kept short because there is no cache-purge hook tied to frontend deploys yet —
 // a long TTL here means bots keep seeing stale title/meta/content after a deploy.
 const CACHE_TTL_SECONDS = 24 * 60 * 60; // 1 day
@@ -100,6 +120,10 @@ const CACHE_TTL_SECONDS = 24 * 60 * 60; // 1 day
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const urlStr = request.url;
+        const { hostname, pathname } = new URL(urlStr);
+        if (NO_CRAWL_HOSTS.has(hostname)) {
+            return serveNoCrawlHost(request, pathname);
+        }
         const userAgent = request.headers.get("User-Agent")?.toLowerCase() || "";
 
         console.log(`[Worker Intercept] URL: ${urlStr} | User-Agent: ${userAgent}`);
