@@ -79,9 +79,8 @@ const BOT_USER_AGENTS = [
     "vkshare",
     "xing-contenttabreceiver",
 
-    // Dev / Lighthouse / Validators
-    "chrome-lighthouse",
-    "google page speed",
+    // Validators. Lighthouse and PageSpeed Insights are left out on purpose: they must measure the
+    // real page that people load, not a prerendered copy.
     "w3c_validator",
 
     // Misc
@@ -117,6 +116,66 @@ async function serveNoCrawlHost(request: Request, pathname: string): Promise<Res
 // a long TTL here means bots keep seeing stale title/meta/content after a deploy.
 const CACHE_TTL_SECONDS = 24 * 60 * 60; // 1 day
 
+// Only page URLs are prerendered. Anything with a file extension (robots.txt, sitemap.xml, llms.txt,
+// /.well-known/*, JS, CSS, images) must reach the bot as the file it is: a browser render wraps it in
+// an HTML viewer, and then crawlers cannot parse it.
+const isPageRequest = (request: Request, pathname: string): boolean =>
+    request.method === "GET" && !/\.\w+$/.test(pathname);
+
+// Not needed for the HTML, and analytics must not count a render as a visit.
+const SKIPPED_RESOURCE_TYPES = new Set(["image", "media", "font"]);
+const SKIPPED_HOSTS = ["googletagmanager.com", "google-analytics.com"];
+
+// The page can set the HTTP status of its render, see NotFoundPage in the frontend.
+const PAGE_STATUS_PATTERN = /<meta[^>]*name="prerender-status-code"[^>]*content="(\d{3})"/;
+
+interface RenderedPageMeta {
+    status: number;
+    // Set when the app redirected to another path.
+    location?: string;
+}
+
+async function renderPage(env: Env, url: string): Promise<{ html: string; meta: RenderedPageMeta }> {
+    const browser = await puppeteer.launch(env.MYBROWSER);
+    // Always close it: a leaked session counts against the Browser Rendering limits until it times out.
+    try {
+        const page = await browser.newPage();
+        await page.setRequestInterception(true);
+        page.on("request", (pageRequest) => {
+            const { hostname } = new URL(pageRequest.url());
+            const skip =
+                SKIPPED_RESOURCE_TYPES.has(pageRequest.resourceType()) ||
+                SKIPPED_HOSTS.some((host) => hostname.endsWith(host));
+            void (skip ? pageRequest.abort() : pageRequest.continue());
+        });
+
+        await page.goto(url, { waitUntil: "networkidle0", timeout: 15000 });
+        const html = await page.content();
+
+        const finalUrl = new URL(page.url());
+        if (finalUrl.pathname !== new URL(url).pathname) {
+            return { html, meta: { status: 301, location: finalUrl.href } };
+        }
+        const status = Number(html.match(PAGE_STATUS_PATTERN)?.[1] ?? 200);
+        return { html, meta: { status } };
+    } finally {
+        await browser.close();
+    }
+}
+
+function pageResponse(html: string, meta: RenderedPageMeta, cacheState: "hit" | "miss"): Response {
+    if (meta.location) {
+        return new Response(null, {
+            status: meta.status,
+            headers: { Location: meta.location, "X-Prerendered": cacheState }
+        });
+    }
+    return new Response(html, {
+        status: meta.status,
+        headers: { "Content-Type": "text/html;charset=UTF-8", "X-Prerendered": cacheState }
+    });
+}
+
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const urlStr = request.url;
@@ -133,7 +192,7 @@ export default {
         // If not a bot, we could either return early (if this worker is only routing),
         // or proxy the request to the original server.
         // Assuming this worker sits in front of the actual application (e.g. as a route):
-        if (!isBot) {
+        if (!isBot || !isPageRequest(request, pathname)) {
             // You should fetch the actual origin or just pass through.
             // If it's the actual cautionlabs.com domain, bypassing will go to the configured origin.
             return fetch(request);
@@ -146,42 +205,26 @@ export default {
 
         try {
             // 1. Check in KV Cache
-            const cachedHtml = forceRefresh ? null : await env.PRERENDER_CACHE.get(urlStr);
-            if (cachedHtml) {
-                return new Response(cachedHtml, {
-                    headers: {
-                        "Content-Type": "text/html;charset=UTF-8",
-                        "X-Prerendered": "hit"
-                    }
-                });
+            if (!forceRefresh) {
+                const cached = await env.PRERENDER_CACHE.getWithMetadata<RenderedPageMeta>(urlStr);
+                if (cached.value) {
+                    // Entries written before statuses were stored have no metadata.
+                    return pageResponse(cached.value, cached.metadata ?? { status: 200 }, "hit");
+                }
             }
 
-            // 2. Not found in KV Cache, launch Puppeteer
-            const browser = await puppeteer.launch(env.MYBROWSER);
-            const page = await browser.newPage();
+            // 2. Not found in KV Cache, render it
+            const { html, meta } = await renderPage(env, urlStr);
 
-            // Navigate to the URL
-            // We set waitUntil to 'networkidle0' and add a 15-second timeout per requirements
-            await page.goto(urlStr, { waitUntil: 'networkidle0', timeout: 15000 });
-
-            // Extract the rendered HTML
-            const renderedHtml = await page.content();
-
-            await page.close();
-            await browser.close();
-
-            // 3. Store in KV Cache with 14-day TTL
-            ctx.waitUntil(
-                env.PRERENDER_CACHE.put(urlStr, renderedHtml, { expirationTtl: CACHE_TTL_SECONDS })
-            );
+            // 3. Store in KV Cache. A 5xx is a passing failure: the next crawl should try again.
+            if (meta.status < 500) {
+                ctx.waitUntil(
+                    env.PRERENDER_CACHE.put(urlStr, html, { expirationTtl: CACHE_TTL_SECONDS, metadata: meta })
+                );
+            }
 
             // 4. Return the prerendered HTML
-            return new Response(renderedHtml, {
-                headers: {
-                    "Content-Type": "text/html;charset=UTF-8",
-                    "X-Prerendered": "miss"
-                }
-            });
+            return pageResponse(html, meta, "miss");
         } catch (err: any) {
             // Fallback: If puppeteer fails, return the original un-rendered content
             console.error("Prerendering failed:", err);
